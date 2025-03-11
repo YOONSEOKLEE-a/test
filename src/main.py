@@ -1,4 +1,3 @@
-#%%
 import os
 import numpy as np
 import pandas as pd
@@ -104,4 +103,3 @@ print("Summary results saved to results/summary_results.csv")
 from IPython.display import display
 display(results_df)
 
-# %%
