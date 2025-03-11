@@ -1,6 +1,6 @@
 # 📊 MPC-Controller for Building Energy Management
 
-This project implements a **Model Predictive Control (MPC)** system to optimize energy management in buildings with battery storage. The controller minimizes **energy costs** and **emissions** by scheduling the charging and discharging of batteries based on forecasted electricity prices, building loads, and emissions data.
+This project implements a **Model Predictive Control (MPC)** system to optimize energy management in buildings with battery storage. The controller minimizes **energy costs** and **emissions** by scheduling the charging and discharging of batteries based on TOU price, forecasted  building loads, and emissions data.
 
 ---
 
