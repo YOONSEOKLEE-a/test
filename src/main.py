@@ -4,9 +4,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from src.environment import Environment
 from src.mpc_agent import MPCAgent
-from src.utils import plot_soc, plot_mode, plot_energy_data, plot_results
+from src.utils import plot_soc, plot_energy_data, plot_results
 
-data_file = r'C:\Asmaa\MINES\BESS Project\EMS_Script_New\python\Git-Hub\MPC-Controller\data\pvLoadPriceData6.csv'
+
+data_file = 'data/pvLoadPriceData6.csv'
 results = []
 
 # Storage for plotting
