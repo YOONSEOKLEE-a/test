@@ -1,106 +1,152 @@
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from src.environment import Environment
-from src.mpc_agent import MPCAgent
-from src.utils import plot_soc, plot_energy_data, plot_results
+# main.py  ── CVX vs TinyMPC (72 h) 1-to-1 comparison
+# ───────────────────────────────────────────────────────────
+import os, pathlib, numpy as np, pandas as pd, matplotlib.pyplot as plt
+from environment   import Environment
+from mpc_agent     import MPCAgent
+from tinympc_agent import TinyMPCAgent
+# If SOC / power timeline plots in utils are unnecessary, feel free to remove
+# from utils         import plot_soc, plot_energy_data
 
+# -----------------------------------------------------------
+DATA_FILE   = r'data/pvLoadPriceData6.csv'
+BUILD_RANGE = range(1, 2)          # {1}
+STEPS       = 72                  # 72-hour simulation
 
-data_file = 'data/pvLoadPriceData6.csv'
-results = []
+summary_rows = []                 # Final summary rows for CSV
 
-# Storage for plotting
-grid_energy = []
-battery_power = []
-load_power = []
-electricity_price = []
-soc_values = []
-time_steps = []
+# ===========================================================
+# ❶  Simulation loop
+# ===========================================================
+for bldg in BUILD_RANGE:
+    print(f"\n▶ Building {bldg}")
 
-for building_number in range(1, 2):  # Iterate through buildings
-    print(f"Running optimization for Building {building_number}...")
-    env = Environment(data_file, building_number)
-    controller = MPCAgent(env, gamma=[0.15, 0.85], planning_steps=24)
+    # ── Independent environment for each controller ----------------------------
+    env_grid  = Environment(DATA_FILE, bldg)     # Baseline without battery
+    env_cvx   = Environment(DATA_FILE, bldg)     # CVX-based MPC
+    env_tiny  = Environment(DATA_FILE, bldg)     # TinyMPC (converted CVXPY)
 
-    # Storage for results
-    total_price_without_battery = 0
-    total_price_with_battery = 0
-    total_emissions_without_battery = 0
-    total_emissions_with_battery = 0
-    total_grid_energy_without_battery = 0
-    total_grid_energy_with_battery = 0
+    cvx_ctrl  = MPCAgent(env_cvx,  gamma=[0.15, 0.85], planning_steps=24)
+    tiny_ctrl = TinyMPCAgent(env_tiny,              planning_steps=24)
 
-    # ✅ Run the simulation loop **only for the first 72 hours**
-    max_simulation_steps = min(72, env.total_steps - controller.planning_steps)
-   # max_simulation_steps = env.total_steps - controller.planning_steps
+    # Initialize dictionaries to store cumulative results ----------------------
+    agg = {
+        'CVX' : dict.fromkeys(
+            ['price_no_batt', 'price_batt',
+             'emiss_no_batt', 'emiss_batt',
+             'grid_no_batt',  'grid_batt'], 0.0),
+        'Tiny': dict.fromkeys(
+            ['price_no_batt', 'price_batt',
+             'emiss_no_batt', 'emiss_batt',
+             'grid_no_batt',  'grid_batt'], 0.0),
+    }
 
-    # Run the simulation loop
-    for step in range(max_simulation_steps):
-        results_opt = controller.predict()
-        if results_opt:
-            Pgrid_total, Pbatt_total, Ebatt = results_opt
-            # Store values for plotting
-            grid_energy.append(Pgrid_total[0])  
-            battery_power.append(Pbatt_total[0])  
-            load_power.append(env.BuildingLoad[step])  
-            electricity_price.append(env.costData[step])  
-            soc_values.append(Ebatt[0])  
-            time_steps.append(step)            
+    # ── Step-by-step simulation (72 h) ----------------------------------------
+    for k in range(STEPS):
+        load_kW   = env_grid.BuildingLoad[k]
+        price     = env_grid.costData[k]
+        emis_rate = env_grid.Emissions[k]         # kg / kWh
+        dt = 1.0                                  # Time interval (h)
 
-            # Calculate prices and emissions without battery
-            actual_grid_price = env.costData[step] * env.BuildingLoad[step]
-            actual_emissions = env.Emissions[step] * env.BuildingLoad[step]
-            total_price_without_battery += actual_grid_price
-            total_emissions_without_battery += actual_emissions
-            total_grid_energy_without_battery += env.BuildingLoad[step] * controller.dt
+        # --- 1) Grid only (No battery) → add to each controller's "No-batt"
+        for tag in ('CVX', 'Tiny'):
+            agg[tag]['price_no_batt'] += price * load_kW
+            agg[tag]['emiss_no_batt'] += emis_rate * load_kW
+            agg[tag]['grid_no_batt']  += load_kW * dt
 
-            # Calculate prices and emissions with battery
-            optimized_grid_power = Pgrid_total[0]
-            optimized_grid_price = env.costData[step] * optimized_grid_power
-            optimized_emissions = env.Emissions[step] * optimized_grid_power
+        # --- 2) CVX MPC -------------------------------------------------------
+        pg_cvx, _, _ = cvx_ctrl.predict()         # (grid kW, batt kW, SOC)
+        pg_cvx = float(np.asarray(pg_cvx).ravel()[0])
+        agg['CVX']['price_batt'] += price * pg_cvx
+        agg['CVX']['emiss_batt'] += emis_rate * pg_cvx
+        agg['CVX']['grid_batt']  += pg_cvx * dt
 
-            total_price_with_battery += optimized_grid_price
-            total_emissions_with_battery += optimized_emissions
-            total_grid_energy_with_battery += optimized_grid_power * controller.dt
+        # --- 3) Tiny MPC ------------------------------------------------------
+        pg_tiny, _, _ = tiny_ctrl.predict()
+        pg_tiny = float(np.asarray(pg_tiny).ravel()[0])
+        agg['Tiny']['price_batt'] += price * pg_tiny
+        agg['Tiny']['emiss_batt'] += emis_rate * pg_tiny
+        agg['Tiny']['grid_batt']  += pg_tiny * dt
 
-    # Calculate Total Savings
-    price_saving = total_price_without_battery - total_price_with_battery
-    emissions_saving_tons = (total_emissions_without_battery - total_emissions_with_battery)
-    grid_energy_saving = total_grid_energy_without_battery - total_grid_energy_with_battery
+    # —— Append summary row ----------------------------------------------------
+    for tag in ('CVX', 'Tiny'):
+        row = {
+            'Building'  : bldg,
+            'Controller': tag,
 
-    # Store results
-    results.append([
-        building_number,
-        total_price_without_battery, total_price_with_battery, price_saving,
-        total_emissions_without_battery, total_emissions_with_battery, emissions_saving_tons,
-        total_grid_energy_without_battery, total_grid_energy_with_battery, grid_energy_saving
-    ])
+            'Total Price Without Battery' : agg[tag]['price_no_batt'],
+            'Total Price With Battery'    : agg[tag]['price_batt'],
+            'Price Saving'                : agg[tag]['price_no_batt'] - agg[tag]['price_batt'],
 
+            'Total Emissions Without Battery' : agg[tag]['emiss_no_batt'],
+            'Total Emissions With Battery'    : agg[tag]['emiss_batt'],
+            'Emissions Saving (kg)'           : agg[tag]['emiss_no_batt'] - agg[tag]['emiss_batt'],
 
+            'Total Grid Energy Without Battery': agg[tag]['grid_no_batt'],
+            'Total Grid Energy With Battery'   : agg[tag]['grid_batt'],
+            'Grid Energy Saving'               : agg[tag]['grid_no_batt'] - agg[tag]['grid_batt'],
+        }
+        summary_rows.append(row)
 
-# Convert SOC to percentage
-if soc_values:  # Avoid empty lists
-    soc_percentage = np.clip([(soc / (controller.batteryEnergy)) * 100 for soc in soc_values], 0, 100)
-else:
-    soc_percentage = []
+# ===========================================================
+# ❷  Save results & visualize
+# ===========================================================
+summary_df = pd.DataFrame(summary_rows)
 
-# Now call plotting functions
-plot_soc(soc_percentage)
-plot_energy_data(time_steps, grid_energy,soc_percentage, battery_power, load_power, electricity_price)
+# Save as CSV
+out_dir = pathlib.Path('results')
+out_dir.mkdir(parents=True, exist_ok=True)
+csv_path = out_dir / 'summary_compare.csv'
+summary_df.to_csv(csv_path, index=False)
+print("\nSaved  ➜", csv_path)
+print(summary_df, "\n")
 
+# ------------------------------------------------------------------
+# ❸  Bar charts for all metrics (2 Controllers × N-metrics)
+# ------------------------------------------------------------------
+# Exclude Building and Controller columns
+metrics = [c for c in summary_df.columns
+           if c not in ('Building', 'Controller')]
 
+n_col   = 3                      # Plots per row
+n_plot  = len(metrics)
+n_row   = int(np.ceil(n_plot / n_col))
 
-# Save results to CSV
-results_df = pd.DataFrame(results, columns=[
-    "Building", "Total Price Without Battery", "Total Price With Battery", "Price Saving",
-    "Total Emissions Without Battery", "Total Emissions With Battery", "Emissions Saving (kg)",
-    "Total Grid Energy Without Battery", "Total Grid Energy With Battery", "Grid Energy Saving"
-])
-results_df.to_csv('results/summary_results.csv', index=False)
-print("Summary results saved to results/summary_results.csv")
+fig, axs = plt.subplots(n_row, n_col,
+                        figsize=(4*n_col, 3*n_row),
+                        squeeze=False)
+axs = axs.ravel()
 
-# Display the full results for all buildings
-from IPython.display import display
-display(results_df)
+unit = {  # y-axis label (unit), if not found → no label
+    'Total Price Without Battery'  : '$',
+    'Total Price With Battery'     : '$',
+    'Price Saving'                 : '$',
+    'Total Emissions Without Battery' : 'kg',
+    'Total Emissions With Battery'    : 'kg',
+    'Emissions Saving (kg)'           : 'kg',
+    'Total Grid Energy Without Battery': 'kWh',
+    'Total Grid Energy With Battery'   : 'kWh',
+    'Grid Energy Saving'               : 'kWh',
+}
 
+for i, col in enumerate(metrics):
+    ax = axs[i]
+    ax.bar(summary_df['Controller'], summary_df[col],
+           color=['tab:blue', 'tab:orange'], width=.6)
+    ax.set_title(col, fontsize=10)
+    ax.set_ylabel(unit.get(col, ''), fontsize=9)
+    ax.grid(axis='y', ls=':')
+    # Label on top of each bar
+    for x, v in enumerate(summary_df[col]):
+        ax.text(x, v*1.01 if v>=0 else v*0.99,
+                f'{v:.3f}', ha='center',
+                va='bottom' if v>=0 else 'top',
+                fontsize=7)
+
+# Remove empty subplots
+for j in range(i+1, len(axs)):
+    fig.delaxes(axs[j])
+
+fig.suptitle('CVX vs TinyMPC — Comparison of All Metrics (72 h, Building 1)',
+             fontsize=14)
+fig.tight_layout(rect=[0, 0.04, 1, 0.96])
+plt.show()
